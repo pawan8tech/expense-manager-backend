@@ -13,7 +13,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors({
-  origin: ["https://finance-manager-seven-self.vercel.app/","http://localhost:3001"], // replace with your Vercel URL
+  origin: ["https://finance-manager-seven-self.vercel.app","http://localhost:3001"], // replace with your Vercel URL
   credentials: true
 }));
 
