@@ -1,9 +1,9 @@
-const expressAsyncHandler = require("express-async-handler");
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
-const User = require("../models/userModel");
+import expressAsyncHandler from "express-async-handler";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import User from "../models/userModel.js";
 
-const registerUser = expressAsyncHandler(async (req, res) => {
+export const registerUser = expressAsyncHandler(async (req, res) => {
   console.log(req.body);
   const { userName, email, password } = req.body;
 
@@ -32,7 +32,7 @@ const registerUser = expressAsyncHandler(async (req, res) => {
   res.json({ message: "user successfully register" });
 });
 
-const loginUser = expressAsyncHandler(async (req, res) => {
+export const loginUser = expressAsyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -52,7 +52,7 @@ const loginUser = expressAsyncHandler(async (req, res) => {
         },
       },
       process.env.ACCESS_TOKEN_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "1d" }
     );
     res.status(200).json({ accessToken });
   } else {
@@ -61,9 +61,8 @@ const loginUser = expressAsyncHandler(async (req, res) => {
   }
 });
 
-const currentUser = expressAsyncHandler(async (req, res) => {
+export const currentUser = expressAsyncHandler(async (req, res) => {
   console.log(req);
   res.json(req.user);
 });
 
-module.exports = { registerUser, loginUser, currentUser };

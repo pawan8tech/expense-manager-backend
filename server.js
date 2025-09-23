@@ -1,7 +1,15 @@
-require("dotenv").config();
-const express = require("express");
-const connectDB = require("./config/db");
-const cors = require("cors");
+import connectDB from "./config/db.js";
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import transactionRoutes from "./routes/transactionRoutes.js";
+import userRoutes from './routes/userRoutes.js';
+import dashboardRoutes from './routes/dashboardRoutes.js';
+import recurringRoutes from './routes/recurringRoutes.js';
+import budgetRoutes from './routes/budgetRoutes.js';
+import savingGoalRoutes from './routes/savingGoalRoutes.js';
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
@@ -10,9 +18,13 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(express.json());
+app.use("/api/savings-goals",savingGoalRoutes);
+app.use("/api/budget",budgetRoutes);
+app.use("/api/dashboard",dashboardRoutes);
+app.use("/api/recurring",recurringRoutes);
+app.use("/api/transactions", transactionRoutes);
+app.use("/api/users", userRoutes);
 
-app.use("/api/expenses", require("./routes/expenseRoutes"));
-app.use("/api/users", require("./routes/userRoutes"));
 
 // Connect to MongoDB
 connectDB();
