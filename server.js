@@ -12,7 +12,11 @@ import savingGoalRoutes from './routes/savingGoalRoutes.js';
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ["https://finance-manager-seven-self.vercel.app/"], // replace with your Vercel URL
+  credentials: true
+}));
+
 
 const PORT = process.env.PORT || 5000;
 
