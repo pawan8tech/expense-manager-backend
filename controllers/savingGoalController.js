@@ -81,8 +81,6 @@ export const getGoals = async (req, res) => {
     // const { userId } = req.user.id;
     const goals = await SavingsGoal.find({ userId : req.user.id }); 
 
-    console.log(goals);
-
     const totalActive = goals.filter(g => g.status === "active").length;
     const totalCompleted = goals.filter(g => g.status === "completed").length;
     const totalSavings = goals?.reduce((sum, g) => sum + g.savedAmount, 0);

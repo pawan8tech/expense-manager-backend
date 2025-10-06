@@ -8,10 +8,13 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import recurringRoutes from './routes/recurringRoutes.js';
 import budgetRoutes from './routes/budgetRoutes.js';
 import savingGoalRoutes from './routes/savingGoalRoutes.js';
+import cookieParser from "cookie-parser";
+
 
 dotenv.config();
 
 const app = express();
+app.use(cookieParser());
 app.use(cors({
   origin: ["https://finance-manager-seven-self.vercel.app","http://localhost:3001"], // replace with your Vercel URL
   credentials: true

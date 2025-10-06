@@ -31,11 +31,17 @@ export const addBudget = async (req, res) => {
   }
 };
 
-// Get all budgets for a user
+// Get budgets (current month or specific month)
 export const getBudgets = async (req, res) => {
   try {
-    const { userId } = req.query;
-    const budgets = await Budget.find({ userId });
+    const { userId, startDate, endDate } = req.query;
+
+    // Find budgets for that month (assuming your budget has startDate/endDate fields)
+    const budgets = await Budget.find({
+      userId,
+      startDate: { $lte: endDate },
+      endDate: { $gte: startDate },
+    });
 
     const results = [];
 
@@ -47,13 +53,17 @@ export const getBudgets = async (req, res) => {
       });
 
       // total spent
-      const totalSpent = transactions.reduce((sum, t) => sum + (t.type === "expense" ? t.amount : 0), 0);
+      const totalSpent = transactions.reduce(
+        (sum, t) => sum + (t.type === "expense" ? t.amount : 0),
+        0
+      );
 
       // category-wise spent
       const categorySpentMap = {};
       transactions.forEach((t) => {
         if (t.type === "expense") {
-          categorySpentMap[t.category] = (categorySpentMap[t.category] || 0) + t.amount;
+          categorySpentMap[t.category] =
+            (categorySpentMap[t.category] || 0) + t.amount;
         }
       });
 
@@ -76,24 +86,17 @@ export const getBudgets = async (req, res) => {
         remainingTotal: budget.totalBudget - totalSpent,
         categories: categoriesWithUtilization,
         startDate: budget.startDate,
-        endDate: budget.endDate,
+        endDate: budget.endDate
       });
     }
-
-    res.json(results);
+    res.status(200).json({
+      success: true,
+      data: results,
+    });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching budgets", error: error.message });
-  }
-};
-
-// Get one budget
-export const getBudgetById = async (req, res) => {
-  try {
-    const budget = await Budget.findById(req.params.id);
-    if (!budget) return res.status(404).json({ message: "Budget not found" });
-    res.json(budget);
-  } catch (error) {
-    res.status(500).json({ message: "Error fetching budget", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching budgets", error: error.message });
   }
 };
 

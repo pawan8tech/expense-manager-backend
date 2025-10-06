@@ -1,50 +1,104 @@
 import Transaction from "../models/transactionModel.js";
+import SavingsGoal from "../models/savingGoalModel.js";
+import Budget from "../models/budgetModel.js";
 import { generateDueTransactions } from "./recurringController.js";
+
+const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 export const getDashboard = async (req, res) => {
   try {
-    // 1️⃣ First generate any missing recurring transactions
+    // 1️⃣ Generate missing recurring transactions
     await generateDueTransactions(req.user.id);
 
     // 2️⃣ Fetch all user transactions
     const transactions = await Transaction.find({ userId: req.user.id }).sort({ date: -1 });
 
-    // 3️⃣ Calculate income & expense totals
-    const totalIncome = transactions
-      .filter(t => t.type === "income")
-      .reduce((sum, t) => sum + t.amount, 0);
+    // 3️⃣ Income, Expense, Savings totals
+    const totalIncome = transactions.filter(t => t.type === "income").reduce((sum, t) => sum + t.amount, 0);
+    const totalExpense = transactions.filter(t => t.type === "expense").reduce((sum, t) => sum + t.amount, 0);
+    const totalSavings = transactions.filter(t => t.type === "savings").reduce((sum, t) => sum + t.amount, 0);
 
-    const totalExpense = transactions
-      .filter(t => t.type === "expense")
-      .reduce((sum, t) => sum + t.amount, 0);
+    const balance = totalIncome - (totalExpense + totalSavings);
 
-    const balance = totalIncome - totalExpense;
+    // 4️⃣ Group monthly summary (income, expense, savings)
+    const monthlyData = {};
 
-    // 4️⃣ Group monthly summary (useful for charts)
-    const monthlySummary = {};
     transactions.forEach(t => {
-      const monthKey = new Date(t.date).toISOString().slice(0, 7); // e.g., "2025-09"
-      if (!monthlySummary[monthKey]) {
-        monthlySummary[monthKey] = { income: 0, expense: 0 };
+      const date = new Date(t.date);
+      const monthKey = date.toISOString().slice(0, 7); // "2025-09"
+      const monthName = monthNames[date.getMonth()];
+
+      if (!monthlyData[monthKey]) {
+        monthlyData[monthKey] = { name: monthName, Expenses: 0, Income: 0, Savings: 0 };
       }
-      if (t.type === "income") {
-        monthlySummary[monthKey].income += t.amount;
-      } else {
-        monthlySummary[monthKey].expense += t.amount;
-      }
+
+      if (t.type === "expense") monthlyData[monthKey].Expenses += t.amount;
+      if (t.type === "income") monthlyData[monthKey].Income += t.amount;
+      if (t.type === "savings") monthlyData[monthKey].Savings += t.amount;
     });
 
-    // 5️⃣ Send response
+    // Convert object → array sorted by month
+    const monthlySummary = Object.keys(monthlyData)
+      .sort()
+      .map(key => monthlyData[key]);
+
+    // 5️⃣ Category-wise expense breakdown (for doughnut chart)
+    const categoryWiseExpense = {};
+    transactions.filter(t => t.type === "expense").forEach(t => {
+      if (!categoryWiseExpense[t.category]) categoryWiseExpense[t.category] = 0;
+      categoryWiseExpense[t.category] += t.amount;
+    });
+    // Convert to array of { name, value }
+    const categoryExpenseArray = Object.keys(categoryWiseExpense).map(cat => ({
+      name: cat,
+      value: categoryWiseExpense[cat]
+    }));
+
+    // 6️⃣ Savings Goals summary
+    const goals = await SavingsGoal.find({ userId: req.user.id });
+    const totalGoalTarget = goals.reduce((sum, g) => sum + g.targetAmount, 0);
+    const totalGoalSaved = goals.reduce((sum, g) => sum + g.savedAmount, 0);
+    const activeGoals = goals.filter(g => g.status === "active").length;
+    const completedGoals = goals.filter(g => g.status === "completed").length;
+
+    // 7️⃣ Budgets (Assuming monthly budget system)
+    const budgets = await Budget.find({ userId: req.user.id });
+    const totalBudget = budgets.reduce((sum, b) => sum + b.amount, 0);
+
+    // Utilized budget = expenses + savings
+    const utilizedBudget = totalExpense + totalSavings;
+    const remainingBudget = totalBudget - utilizedBudget;
+
+    // 8️⃣ Final response
     res.json({
       success: true,
       data: {
         totalIncome,
         totalExpense,
+        totalSavings,
         balance,
-        recentTransactions: transactions.slice(0, 5), // latest 5
+
+        budget: {
+          totalBudget,
+          utilizedBudget,
+          remainingBudget,
+        },
+
+        savingsGoals: {
+          totalTarget: totalGoalTarget,
+          totalSaved: totalGoalSaved,
+          activeGoals,
+          completedGoals,
+        },
+
         monthlySummary,
+        categoryWiseExpense:categoryExpenseArray,
+
+        recentTransactions: transactions.slice(0, 10), // latest 10
       },
     });
+
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
