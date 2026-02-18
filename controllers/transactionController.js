@@ -3,65 +3,223 @@ import asyncHandler from "express-async-handler";
 import Transaction from "../models/transactionModel.js"; 
 // src/controllers/transactionController.js
 import { generateDueTransactions } from "./recurringController.js";
+import mongoose from "mongoose";
 
 export const getTransactions = asyncHandler(async (req, res) => {
   await generateDueTransactions(req.user.id);
 
-  const { startDate, endDate, type, category } = req.query;
+  // Pagination parameters
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  // Filter parameters
+  const { startDate, endDate, type, category, search } = req.query;
   const filter = { userId: req.user.id };
 
-  if (type) filter.type = type;
-  if (category) filter.category = category;
+  // Type filter (income/expense)
+  if (type && type !== 'all') {
+    filter.type = type;
+  }
+
+  // Category filter
+  if (category) {
+    filter.category = category;
+  }
+
+  // Date range filter
   if (startDate && endDate) {
     filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
   }
 
-  const transactions = await Transaction.find(filter).sort({ date: -1 });
+  // Search filter (search in name)
+  if (search && search.trim()) {
+    filter.$or = [
+      { name: { $regex: search.trim(), $options: 'i' } },
+      { category: { $regex: search.trim(), $options: 'i' } }
+    ];
+  }
+
+  // Get total count for pagination
+  const totalCount = await Transaction.countDocuments(filter);
+  const totalPages = Math.ceil(totalCount / limit);
+
+  // Get paginated transactions
+  const transactions = await Transaction.find(filter)
+    .sort({ date: -1 })
+    .skip(skip)
+    .limit(limit);
+
+  // Get counts by type for the current filter (excluding type filter)
+  const countFilter = { userId: req.user.id };
+  if (startDate && endDate) {
+    countFilter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
+  }
+  if (search && search.trim()) {
+    countFilter.$or = [
+      { name: { $regex: search.trim(), $options: 'i' } },
+      { category: { $regex: search.trim(), $options: 'i' } }
+    ];
+  }
+
+  const allCount = await Transaction.countDocuments(countFilter);
+  const incomeCount = await Transaction.countDocuments({ ...countFilter, type: 'income' });
+  const expenseCount = await Transaction.countDocuments({ ...countFilter, type: 'expense' });
+  const savingCount = await Transaction.countDocuments({ ...countFilter, type: 'saving' });
 
   // ---------- Summary Calculations ----------
+  const userId = new mongoose.Types.ObjectId(req.user.id);
   const now = new Date();
-  const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-
-  const monthFilter = {
-    userId: req.user.id,
-    date: { $gte: firstDayOfMonth, $lte: lastDayOfMonth },
+  
+  // Helper function to calculate percentage change
+  const calcPercentChange = (current, previous) => {
+    if (previous === 0) {
+      return current > 0 ? 100 : 0;
+    }
+    return Math.round(((current - previous) / previous) * 100);
   };
 
-  const monthlyTransactions = await Transaction.find(monthFilter);
+  // Determine the current period and previous period based on filter
+  let currentPeriodStart, currentPeriodEnd, prevPeriodStart, prevPeriodEnd;
+  let periodLabel = 'this month';
+  let comparisonLabel = 'vs last month';
 
-  const incomeThisMonth = monthlyTransactions
-    .filter((t) => t.type === "income")
-    .reduce((sum, t) => sum + t.amount, 0);
+  if (startDate && endDate) {
+    // Use the filter dates as current period
+    currentPeriodStart = new Date(startDate);
+    currentPeriodEnd = new Date(endDate);
+    
+    // Calculate the duration of the period
+    const periodDuration = currentPeriodEnd.getTime() - currentPeriodStart.getTime();
+    
+    // Previous period is the same duration before the current period
+    prevPeriodEnd = new Date(currentPeriodStart.getTime() - 1); // Day before current start
+    prevPeriodStart = new Date(prevPeriodEnd.getTime() - periodDuration);
+    
+    // Set labels based on filter type
+    const daysDiff = Math.ceil(periodDuration / (1000 * 60 * 60 * 24));
+    if (daysDiff <= 31) {
+      periodLabel = 'selected period';
+      comparisonLabel = 'vs previous period';
+    } else if (daysDiff <= 93) {
+      periodLabel = 'selected period';
+      comparisonLabel = 'vs previous period';
+    } else {
+      periodLabel = 'selected period';
+      comparisonLabel = 'vs previous period';
+    }
+  } else {
+    // Default to current month
+    currentPeriodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    currentPeriodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    
+    // Previous month
+    prevPeriodStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    prevPeriodEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+    
+    periodLabel = 'this month';
+    comparisonLabel = 'vs last month';
+  }
 
-  const expenseThisMonth = monthlyTransactions
-    .filter((t) => t.type === "expense")
-    .reduce((sum, t) => sum + t.amount, 0);
+  // Current period aggregation
+  const currentPeriodFilter = {
+    userId,
+    date: { $gte: currentPeriodStart, $lte: currentPeriodEnd },
+  };
 
-  // Current balance = total income - total expense (all time)
-  const allTransactions = await Transaction.find({ userId: req.user.id });
+  const currentPeriodAggregation = await Transaction.aggregate([
+    { $match: currentPeriodFilter },
+    {
+      $group: {
+        _id: "$type",
+        total: { $sum: "$amount" }
+      }
+    }
+  ]);
 
-  const totalIncome = allTransactions
-    .filter((t) => t.type === "income")
-    .reduce((sum, t) => sum + t.amount, 0);
+  const currentIncome = currentPeriodAggregation.find(a => a._id === 'income')?.total || 0;
+  const currentExpense = currentPeriodAggregation.find(a => a._id === 'expense')?.total || 0;
+  const currentSavings = currentIncome - currentExpense;
 
-  const totalExpense = allTransactions
-    .filter((t) => t.type === "expense")
-    .reduce((sum, t) => sum + t.amount, 0);
+  // Previous period aggregation
+  const prevPeriodFilter = {
+    userId,
+    date: { $gte: prevPeriodStart, $lte: prevPeriodEnd },
+  };
 
+  const prevPeriodAggregation = await Transaction.aggregate([
+    { $match: prevPeriodFilter },
+    {
+      $group: {
+        _id: "$type",
+        total: { $sum: "$amount" }
+      }
+    }
+  ]);
+
+  const prevIncome = prevPeriodAggregation.find(a => a._id === 'income')?.total || 0;
+  const prevExpense = prevPeriodAggregation.find(a => a._id === 'expense')?.total || 0;
+  const prevSavings = prevIncome - prevExpense;
+
+  // All time aggregation for current balance
+  const allTimeAggregation = await Transaction.aggregate([
+    { $match: { userId } },
+    {
+      $group: {
+        _id: "$type",
+        total: { $sum: "$amount" }
+      }
+    }
+  ]);
+
+  const totalIncome = allTimeAggregation.find(a => a._id === 'income')?.total || 0;
+  const totalExpense = allTimeAggregation.find(a => a._id === 'expense')?.total || 0;
   const currentBalance = totalIncome - totalExpense;
 
-  // Savings = income - expense of this month
-  const savings = incomeThisMonth - expenseThisMonth;
+  // Calculate percentage changes
+  const incomeChange = calcPercentChange(currentIncome, prevIncome);
+  const expenseChange = calcPercentChange(currentExpense, prevExpense);
+  const savingsChange = calcPercentChange(currentSavings, prevSavings);
+
+  // Calculate balance change (compare balance at end of current period vs end of previous period)
+  // For simplicity, we'll compare current savings to previous savings as balance indicator
+  const balanceChange = calcPercentChange(currentSavings, prevSavings);
 
   res.status(200).json({
     success: true,
     data: transactions,
+    pagination: {
+      currentPage: page,
+      totalPages,
+      totalCount,
+      limit,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1
+    },
+    counts: {
+      all: allCount,
+      income: incomeCount,
+      expense: expenseCount,
+      saving: savingCount
+    },
     summary: {
       currentBalance,
-      savings,
-      incomeThisMonth,
-      expenseThisMonth,
+      totalIncome: currentIncome,
+      totalExpense: currentExpense,
+      savings: currentSavings,
+      periodLabel,
+      comparisonLabel,
+      changes: {
+        income: incomeChange,
+        expense: expenseChange,
+        savings: savingsChange,
+        balance: balanceChange
+      },
+      previous: {
+        income: prevIncome,
+        expense: prevExpense,
+        savings: prevSavings
+      }
     },
   });
 })

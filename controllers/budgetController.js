@@ -5,7 +5,8 @@ import transactionModel from "../models/transactionModel.js";
 // Add Budget
 export const addBudget = async (req, res) => {
   try {
-    const { userId, name, totalBudget, categories, startDate, endDate } = req.body;
+    const { name, totalBudget, categories, startDate, endDate } = req.body;
+    const userId = req.user.id; // Get userId from JWT token
 
     // validation: sum of categories should not exceed total
     const categorySum = categories?.reduce((sum, c) => sum + c.amount, 0) || 0;
@@ -25,7 +26,7 @@ export const addBudget = async (req, res) => {
     });
 
     await newBudget.save();
-    res.status(201).json(newBudget);
+    res.status(201).json({ success: true, data: newBudget });
   } catch (error) {
     res.status(500).json({ message: "Error adding budget", error: error.message });
   }
@@ -34,7 +35,8 @@ export const addBudget = async (req, res) => {
 // Get budgets (current month or specific month)
 export const getBudgets = async (req, res) => {
   try {
-    const { userId, startDate, endDate } = req.query;
+    const { startDate, endDate } = req.query;
+    const userId = req.user.id; // Get userId from JWT token
 
     // Find budgets for that month (assuming your budget has startDate/endDate fields)
     const budgets = await Budget.find({
@@ -104,6 +106,7 @@ export const getBudgets = async (req, res) => {
 export const updateBudget = async (req, res) => {
   try {
     const { totalBudget, categories } = req.body;
+    const userId = req.user.id; // Get userId from JWT token
 
     // validation: sum of categories should not exceed total
     const categorySum = categories?.reduce((sum, c) => sum + c.amount, 0) || 0;
@@ -113,13 +116,16 @@ export const updateBudget = async (req, res) => {
       });
     }
 
-    const updated = await Budget.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-    });
+    // Only update budget if it belongs to the user
+    const updated = await Budget.findOneAndUpdate(
+      { _id: req.params.id, userId },
+      req.body,
+      { new: true }
+    );
 
     if (!updated) return res.status(404).json({ message: "Budget not found" });
 
-    res.json(updated);
+    res.json({ success: true, data: updated });
   } catch (error) {
     res.status(500).json({ message: "Error updating budget", error: error.message });
   }
@@ -128,9 +134,16 @@ export const updateBudget = async (req, res) => {
 // Delete Budget
 export const deleteBudget = async (req, res) => {
   try {
-    const deleted = await Budget.findByIdAndDelete(req.params.id);
+    const userId = req.user.id; // Get userId from JWT token
+    
+    // Only delete budget if it belongs to the user
+    const deleted = await Budget.findOneAndDelete({ 
+      _id: req.params.id, 
+      userId 
+    });
+    
     if (!deleted) return res.status(404).json({ message: "Budget not found" });
-    res.json({ message: "Budget deleted successfully" });
+    res.json({ success: true, message: "Budget deleted successfully" });
   } catch (error) {
     res.status(500).json({ message: "Error deleting budget", error: error.message });
   }
