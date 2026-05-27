@@ -1,3 +1,10 @@
+/**
+ * IMPORTANT: Bypass SSL certificate verification for development
+ * This fixes "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" errors in corporate/proxy environments
+ * Remove this in production or use proper CA certificates
+ */
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 import connectDB from "./config/db.js";
 import express from "express";
 import dotenv from "dotenv";
@@ -8,6 +15,9 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import recurringRoutes from './routes/recurringRoutes.js';
 import budgetRoutes from './routes/budgetRoutes.js';
 import savingGoalRoutes from './routes/savingGoalRoutes.js';
+import chatRoutes from './routes/chatRoutes.js';
+import reportsRoutes from './routes/reportsRoutes.js';
+import categoryRoutes from './routes/categoryRoutes.js';
 import cookieParser from "cookie-parser";
 
 
@@ -31,6 +41,9 @@ app.use("/api/dashboard",dashboardRoutes);
 app.use("/api/recurring",recurringRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/reports", reportsRoutes);
+app.use("/api/categories", categoryRoutes);
 
 
 // Connect to MongoDB

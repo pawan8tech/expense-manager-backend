@@ -1,9 +1,20 @@
 // src/controllers/transactionController.js
 import asyncHandler from "express-async-handler";
-import Transaction from "../models/transactionModel.js"; 
-// src/controllers/transactionController.js
+import Transaction from "../models/transactionModel.js";
 import { generateDueTransactions } from "./recurringController.js";
 import mongoose from "mongoose";
+
+// Fields the client is allowed to write. Anything else in req.body (userId,
+// _id, archived, recurringId, etc.) is dropped so a malicious payload can't
+// cross-write into another user's account or flip server-managed flags.
+const TX_EDITABLE_FIELDS = ["name", "type", "amount", "category", "note", "date"];
+const pickTxFields = (body = {}) => {
+  const out = {};
+  for (const key of TX_EDITABLE_FIELDS) {
+    if (body[key] !== undefined) out[key] = body[key];
+  }
+  return out;
+};
 
 export const getTransactions = asyncHandler(async (req, res) => {
   await generateDueTransactions(req.user.id);
@@ -139,7 +150,8 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   const currentIncome = currentPeriodAggregation.find(a => a._id === 'income')?.total || 0;
   const currentExpense = currentPeriodAggregation.find(a => a._id === 'expense')?.total || 0;
-  const currentSavings = currentIncome - currentExpense;
+  // Actual amount the user moved to savings in this period (type: 'saving')
+  const currentSavings = currentPeriodAggregation.find(a => a._id === 'saving')?.total || 0;
 
   // Previous period aggregation
   const prevPeriodFilter = {
@@ -159,7 +171,7 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   const prevIncome = prevPeriodAggregation.find(a => a._id === 'income')?.total || 0;
   const prevExpense = prevPeriodAggregation.find(a => a._id === 'expense')?.total || 0;
-  const prevSavings = prevIncome - prevExpense;
+  const prevSavings = prevPeriodAggregation.find(a => a._id === 'saving')?.total || 0;
 
   // All time aggregation for current balance
   const allTimeAggregation = await Transaction.aggregate([
@@ -174,16 +186,20 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   const totalIncome = allTimeAggregation.find(a => a._id === 'income')?.total || 0;
   const totalExpense = allTimeAggregation.find(a => a._id === 'expense')?.total || 0;
-  const currentBalance = totalIncome - totalExpense;
+  const totalSaving = allTimeAggregation.find(a => a._id === 'saving')?.total || 0;
+  // Balance = liquid money left. Savings transfers are deducted because the
+  // money has been moved into a goal (matches dashboard semantics).
+  const currentBalance = totalIncome - totalExpense - totalSaving;
 
   // Calculate percentage changes
   const incomeChange = calcPercentChange(currentIncome, prevIncome);
   const expenseChange = calcPercentChange(currentExpense, prevExpense);
   const savingsChange = calcPercentChange(currentSavings, prevSavings);
 
-  // Calculate balance change (compare balance at end of current period vs end of previous period)
-  // For simplicity, we'll compare current savings to previous savings as balance indicator
-  const balanceChange = calcPercentChange(currentSavings, prevSavings);
+  // Balance change = net cashflow this period vs net cashflow last period.
+  const currentNet = currentIncome - currentExpense - currentSavings;
+  const prevNet = prevIncome - prevExpense - prevSavings;
+  const balanceChange = calcPercentChange(currentNet, prevNet);
 
   res.status(200).json({
     success: true,
@@ -226,13 +242,13 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   
 // Add Transaction
-export const addTransaction = asyncHandler(async (req, res) => { 
-    const { type, amount, category, name, date } = req.body;
-    const transaction = new Transaction({
-      userId: req.user.id,...req.body});
-
-    await transaction.save();
-    res.status(201).json({ success: true, data: transaction })  
+export const addTransaction = asyncHandler(async (req, res) => {
+  const transaction = new Transaction({
+    ...pickTxFields(req.body),
+    userId: req.user.id,
+  });
+  await transaction.save();
+  res.status(201).json({ success: true, data: transaction });
 });
 
 // Get Single Transaction
@@ -248,27 +264,27 @@ export const getTransaction =asyncHandler( async (req, res) => {
 });
 // Update Transaction
 export const updateTransaction = asyncHandler(async (req, res) => {
-    const transaction = await Transaction.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user.id },
-      req.body,
-      { new: true }
-    );
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: "Not found" });
-    }
-    res.status(200).json({ success: true, data: transaction });
+  const transaction = await Transaction.findOneAndUpdate(
+    { _id: req.params.id, userId: req.user.id },
+    { $set: pickTxFields(req.body) },
+    { new: true }
+  );
+  if (!transaction) {
+    return res.status(404).json({ success: false, message: "Not found" });
+  }
+  res.status(200).json({ success: true, data: transaction });
 });
 
 // Delete Transaction
-export const deleteTransaction =asyncHandler(async (req, res) => {
-    const transaction = await Transaction.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.id
-    });
+export const deleteTransaction = asyncHandler(async (req, res) => {
+  const transaction = await Transaction.findOneAndDelete({
+    _id: req.params.id,
+    userId: req.user.id,
+  });
 
-    if (!transaction) {
-      return res.status(404).json({ success: false, message: "Not found" });
-    }
+  if (!transaction) {
+    return res.status(404).json({ success: false, message: "Not found" });
+  }
 
-    res.status(200).json({ success: true, message: "Transaction deleted" });
+  res.status(200).json({ success: true, message: "Transaction deleted" });
 });

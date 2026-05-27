@@ -14,8 +14,9 @@ const recurringSchema = new mongoose.Schema({
   startDate: { type: Date, required: true },
   endDate: { type: Date, default: null },
 
-  lastGenerated: { type: Date, default: null }, 
-  isActive: { type: Boolean, default: true }
+  lastGenerated: { type: Date, default: null },
+  isActive: { type: Boolean, default: true },
+  pausedAt: { type: Date, default: null }
 }, { timestamps: true });
 
 export default mongoose.model("RecurringRule", recurringSchema);

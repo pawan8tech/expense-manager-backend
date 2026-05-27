@@ -4,14 +4,23 @@ import {
   getRecurring,
   getRecurringById,
   updateRecurring,
-  deleteRecurring
+  deleteRecurring,
+  pauseRecurring,
+  resumeRecurring,
 } from "../controllers/recurringController.js";
 import validateToken from "../middleware/validateTokenHandler.js";
-const router = express.Router();
 
-router.use(validateToken); 
+const router = express.Router();
+router.use(validateToken);
 
 router.route("/").post(addRecurring).get(getRecurring);
-router.route("/:id").get(getRecurringById).put(updateRecurring).delete(deleteRecurring);
+router
+  .route("/:id")
+  .get(getRecurringById)
+  .put(updateRecurring)
+  .delete(deleteRecurring);
+
+router.post("/:id/pause", pauseRecurring);
+router.post("/:id/resume", resumeRecurring);
 
 export default router;
