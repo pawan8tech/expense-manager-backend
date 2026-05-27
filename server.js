@@ -15,7 +15,7 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import recurringRoutes from './routes/recurringRoutes.js';
 import budgetRoutes from './routes/budgetRoutes.js';
 import savingGoalRoutes from './routes/savingGoalRoutes.js';
-import chatRoutes from './routes/chatRoutes.js';
+// import chatRoutes from './routes/chatRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import cookieParser from "cookie-parser";
@@ -41,7 +41,7 @@ app.use("/api/dashboard",dashboardRoutes);
 app.use("/api/recurring",recurringRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/chat", chatRoutes);
+// app.use("/api/chat", chatRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/categories", categoryRoutes);
 
