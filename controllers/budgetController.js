@@ -2,6 +2,69 @@
 import Budget from "../models/budgetModel.js";
 import transactionModel from "../models/transactionModel.js";
 
+// -------------------- Duplicate-period helpers -------------------- //
+// Compare two dates by calendar day in UTC (dates are stored as UTC midnight
+// of the chosen "YYYY-MM-DD"), so time components never cause false misses.
+const sameCalendarDay = (a, b) => {
+  const da = new Date(a);
+  const db = new Date(b);
+  return (
+    da.getUTCFullYear() === db.getUTCFullYear() &&
+    da.getUTCMonth() === db.getUTCMonth() &&
+    da.getUTCDate() === db.getUTCDate()
+  );
+};
+
+const isFullCalendarMonth = (s, e) => {
+  const ds = new Date(s);
+  const de = new Date(e);
+  const lastDay = new Date(Date.UTC(ds.getUTCFullYear(), ds.getUTCMonth() + 1, 0)).getUTCDate();
+  return (
+    ds.getUTCDate() === 1 &&
+    de.getUTCDate() === lastDay &&
+    ds.getUTCMonth() === de.getUTCMonth() &&
+    ds.getUTCFullYear() === de.getUTCFullYear()
+  );
+};
+
+const isFullCalendarYear = (s, e) => {
+  const ds = new Date(s);
+  const de = new Date(e);
+  return (
+    ds.getUTCMonth() === 0 && ds.getUTCDate() === 1 &&
+    de.getUTCMonth() === 11 && de.getUTCDate() === 31 &&
+    ds.getUTCFullYear() === de.getUTCFullYear()
+  );
+};
+
+const duplicatePeriodMessage = (s, e) => {
+  if (isFullCalendarYear(s, e)) return "You already have a budget for this year";
+  if (isFullCalendarMonth(s, e)) return "You already have a budget for this month";
+  return "You already have a budget for this period";
+};
+
+// Find an existing budget for the user covering the exact same calendar range
+// (same month / same year). Monthly and yearly budgets have distinct ranges,
+// so they never collide with each other. `excludeId` skips the budget being
+// updated so it isn't flagged as a duplicate of itself.
+const findDuplicatePeriodBudget = async (userId, startDate, endDate, excludeId = null) => {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  // Narrow to budgets whose range overlaps the new one, then require an
+  // exact day-for-day match on both ends.
+  const candidates = await Budget.find({
+    userId,
+    startDate: { $lte: end },
+    endDate: { $gte: start },
+  });
+  return candidates.find(
+    (b) =>
+      (!excludeId || String(b._id) !== String(excludeId)) &&
+      sameCalendarDay(b.startDate, start) &&
+      sameCalendarDay(b.endDate, end)
+  );
+};
+
 // Add Budget
 export const addBudget = async (req, res) => {
   try {
@@ -14,6 +77,12 @@ export const addBudget = async (req, res) => {
       return res.status(400).json({
         message: "Sum of category budgets cannot exceed total budget",
       });
+    }
+
+    // Block a second budget for the same month / year.
+    const duplicate = await findDuplicatePeriodBudget(userId, startDate, endDate);
+    if (duplicate) {
+      return res.status(409).json({ message: duplicatePeriodMessage(startDate, endDate) });
     }
 
     const newBudget = new Budget({
@@ -105,7 +174,7 @@ export const getBudgets = async (req, res) => {
 // Update Budget
 export const updateBudget = async (req, res) => {
   try {
-    const { totalBudget, categories } = req.body;
+    const { totalBudget, categories, startDate, endDate } = req.body;
     const userId = req.user.id; // Get userId from JWT token
 
     // validation: sum of categories should not exceed total
@@ -114,6 +183,15 @@ export const updateBudget = async (req, res) => {
       return res.status(400).json({
         message: "Sum of category budgets cannot exceed total budget",
       });
+    }
+
+    // If the period changed, block colliding with another month/year budget
+    // (excluding this one).
+    if (startDate && endDate) {
+      const duplicate = await findDuplicatePeriodBudget(userId, startDate, endDate, req.params.id);
+      if (duplicate) {
+        return res.status(409).json({ message: duplicatePeriodMessage(startDate, endDate) });
+      }
     }
 
     // Only update budget if it belongs to the user
