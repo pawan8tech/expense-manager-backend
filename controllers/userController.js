@@ -63,7 +63,9 @@ export const registerUser = expressAsyncHandler(async (req, res) => {
   });
 });
 
-export const loginUser = expressAsyncHandler(async (req, res) => {
+export const loginUser = expressAsyncHandler(async (req, res) => { 
+
+ 
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -72,8 +74,13 @@ export const loginUser = expressAsyncHandler(async (req, res) => {
 
   const user = await User.findOne({ email });
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ message: "Email or Password is not valid" });
+  if (!user) {
+    return res.status(404).json({ message: "No user found with this email" });
+  }
+
+  const isPasswordValid = await bcrypt.compare(password, user.password);
+  if (!isPasswordValid) {
+    return res.status(401).json({ message: "Password is not correct" });
   }
 
   const accessToken = signAccessToken(user);
