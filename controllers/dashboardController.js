@@ -13,8 +13,12 @@ export const getDashboard = async (req, res) => {
     // 1. Materialize any due recurring transactions first
     await generateDueTransactions(req.user.id);
 
-    // 2. Pull transactions once, sorted desc
-    const transactions = await Transaction.find({ userId: req.user.id }).sort({
+    // 2. Pull transactions once, sorted desc. Planned/future event spends are
+    //    excluded so they don't distort balance, income, or expense totals.
+    const transactions = await Transaction.find({
+      userId: req.user.id,
+      isPlanned: { $ne: true },
+    }).sort({
       date: -1,
     });
 

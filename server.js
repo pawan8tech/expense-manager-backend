@@ -15,6 +15,7 @@ import dashboardRoutes from './routes/dashboardRoutes.js';
 import recurringRoutes from './routes/recurringRoutes.js';
 import budgetRoutes from './routes/budgetRoutes.js';
 import savingGoalRoutes from './routes/savingGoalRoutes.js';
+import eventRoutes from './routes/eventRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
@@ -41,6 +42,7 @@ const PORT = process.env.PORT || 5001;
 // Middleware
 app.use(express.json());
 app.use("/api/savings-goals",savingGoalRoutes);
+app.use("/api/events",eventRoutes);
 app.use("/api/budget",budgetRoutes);
 app.use("/api/dashboard",dashboardRoutes);
 app.use("/api/recurring",recurringRoutes);

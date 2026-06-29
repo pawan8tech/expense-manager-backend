@@ -48,6 +48,20 @@ export const getGoals = async (req, res) => {
     const totalSavings = goals.reduce((sum, g) => sum + g.savedAmount, 0);
     const totalTarget = goals.reduce((sum, g) => sum + g.targetAmount, 0);
 
+    // Net amount saved this calendar month (deposits minus withdrawals) so the
+    // "This Month" card on the Savings page reflects real activity.
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const monthContributions = await Contribution.find({
+      userId: req.user.id,
+      date: { $gte: monthStart },
+    });
+    const savedThisMonth = monthContributions.reduce(
+      (sum, c) => sum + (c.type === "withdrawal" ? -c.amount : c.amount),
+      0
+    );
+
     res.json({
       success: true,
       summary: {
@@ -55,7 +69,8 @@ export const getGoals = async (req, res) => {
         totalActive,
         totalCompleted,
         totalSavings,
-        totalTarget
+        totalTarget,
+        savedThisMonth
       },
       data: goals
     });
@@ -162,8 +177,10 @@ export const deleteGoal = async (req, res) => {
       return res.status(404).json({ success: false, message: "Goal not found" });
     }
 
-    // Also delete all contributions for this goal
+    // Also delete all contributions and the savings/withdrawal transactions
+    // that were created for this goal, so nothing is left orphaned.
     await Contribution.deleteMany({ savingsGoalId: req.params.id });
+    await Transaction.deleteMany({ userId: req.user.id, savingsGoalId: req.params.id });
 
     res.json({ success: true, message: "Goal and contributions deleted successfully" });
   } catch (error) {
@@ -253,8 +270,15 @@ export const contributeToGoal = async (req, res) => {
  */
 export const withdrawFromGoal = async (req, res) => {
   try {
-    const { amount, note, date } = req.body;
+    const { amount, note, date, mode } = req.body;
     const goalId = req.params.id || req.body.goalId;
+
+    // How the withdrawn money is recorded as a transaction:
+    //   "balance"  -> income (money returns to the current balance — this
+    //                 reverses the original contribution, so saving then
+    //                 withdrawing nets to zero on the balance). Default.
+    //   "expense"  -> expense (the user is spending the saved money directly).
+    const withdrawMode = mode === "expense" ? "expense" : "balance";
 
     // Validate amount
     if (!amount || amount <= 0) {
@@ -289,29 +313,51 @@ export const withdrawFromGoal = async (req, res) => {
       date: date || new Date()
     });
 
-    // Create expense transaction for tracking
-    const transaction = await Transaction.create({
+    const when = date || new Date();
+
+    // Always credit the money back to the current balance first as income —
+    // this reverses the original contribution, so the balance is made whole.
+    const incomeTransaction = await Transaction.create({
       userId: req.user.id,
-      type: "expense",
+      type: "income",
       amount,
       name: goal.name,
-      category: goal.category,
+      category: "Savings Withdrawal",
       note: note || `Withdrawal from ${goal.name}`,
-      date: date || new Date(),
+      date: when,
       savingsGoalId: goalId
     });
+
+    // For "Spend it", also record the matching expense, so the purchase shows
+    // up in reports. Income (+) and expense (−) of the same amount cancel on
+    // the balance — that's what prevents the double-count.
+    let expenseTransaction = null;
+    if (withdrawMode === "expense") {
+      expenseTransaction = await Transaction.create({
+        userId: req.user.id,
+        type: "expense",
+        amount,
+        name: goal.name,
+        category: goal.category,
+        note: note || `Spent from ${goal.name}`,
+        date: when,
+        savingsGoalId: goalId
+      });
+    }
 
     // Update goal savedAmount
     goal.savedAmount = Number(goal.savedAmount) - Number(amount);
     await goal.save();
 
-    res.status(201).json({ 
-      success: true, 
-      data: { 
-        goal, 
-        contribution, 
-        transaction 
-      } 
+    res.status(201).json({
+      success: true,
+      data: {
+        goal,
+        contribution,
+        transaction: incomeTransaction,
+        incomeTransaction,
+        expenseTransaction
+      }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Error withdrawing from goal", error: error.message });

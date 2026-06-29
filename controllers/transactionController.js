@@ -26,7 +26,9 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   // Filter parameters
   const { startDate, endDate, type, category, search } = req.query;
-  const filter = { userId: req.user.id };
+  // Planned/future event spends are excluded everywhere here — they live in
+  // the event view and must not affect the main list, counts, or balance.
+  const filter = { userId: req.user.id, isPlanned: { $ne: true } };
 
   // Type filter (income/expense)
   if (type && type !== 'all') {
@@ -62,7 +64,7 @@ export const getTransactions = asyncHandler(async (req, res) => {
     .limit(limit);
 
   // Get counts by type for the current filter (excluding type filter)
-  const countFilter = { userId: req.user.id };
+  const countFilter = { userId: req.user.id, isPlanned: { $ne: true } };
   if (startDate && endDate) {
     countFilter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
   }
@@ -135,6 +137,7 @@ export const getTransactions = asyncHandler(async (req, res) => {
   // Current period aggregation
   const currentPeriodFilter = {
     userId,
+    isPlanned: { $ne: true },
     date: { $gte: currentPeriodStart, $lte: currentPeriodEnd },
   };
 
@@ -156,6 +159,7 @@ export const getTransactions = asyncHandler(async (req, res) => {
   // Previous period aggregation
   const prevPeriodFilter = {
     userId,
+    isPlanned: { $ne: true },
     date: { $gte: prevPeriodStart, $lte: prevPeriodEnd },
   };
 
@@ -175,7 +179,7 @@ export const getTransactions = asyncHandler(async (req, res) => {
 
   // All time aggregation for current balance
   const allTimeAggregation = await Transaction.aggregate([
-    { $match: { userId } },
+    { $match: { userId, isPlanned: { $ne: true } } },
     {
       $group: {
         _id: "$type",

@@ -112,16 +112,75 @@ function normalizeDate(dateInput) {
 }
 
 /**
+ * Fetch the user's visible categories, grouped by transaction type.
+ */
+async function fetchUserCategories(userId) {
+  const cats = await Category.find({ userId, hidden: { $ne: true } })
+    .select("name type")
+    .lean();
+  return {
+    expense: cats.filter((c) => c.type === "expense").map((c) => c.name),
+    income: cats.filter((c) => c.type === "income").map((c) => c.name),
+  };
+}
+
+/**
+ * Category names valid for a given draft type.
+ */
+function categoriesForType(userCategories, type) {
+  return type === "income" ? userCategories.income : userCategories.expense;
+}
+
+/**
+ * True if `category` matches one of the user's category names (case-insensitive).
+ */
+function isKnownCategory(category, names) {
+  if (!category) return false;
+  return names.some((n) => n.toLowerCase() === String(category).toLowerCase());
+}
+
+/**
+ * Compute and send the next step after the draft changed: ask for the next
+ * missing field (with category options when relevant) or move to confirmation.
+ */
+function sendNextStep(res, conversationId, draft, categoryNames) {
+  const missingFields = getMissingFields(draft);
+
+  if (missingFields.length > 0) {
+    updateConversation(conversationId, {
+      status: "COLLECTING",
+      missingFields,
+    });
+    return res.json({
+      success: true,
+      data: createQuestionResponse(missingFields[0], conversationId, draft.type, categoryNames),
+    });
+  }
+
+  updateConversation(conversationId, {
+    status: "READY_TO_CONFIRM",
+    missingFields: [],
+  });
+  return res.json({
+    success: true,
+    data: createConfirmationResponse(draft, conversationId),
+  });
+}
+
+/**
  * Generate a response asking for a specific missing field
  * @param {string} field - Missing field name
  * @param {string} conversationId 
  * @returns {object} - Question response
  */
-function createQuestionResponse(field, conversationId, entryType) {
+function createQuestionResponse(field, conversationId, entryType, options = []) {
   return {
     type: "QUESTION",
     question: fieldQuestion(field, entryType),
     field,
+    // For the category field we send the user's own categories so the
+    // frontend can show a dropdown to pick from instead of typing.
+    options: field === "category" ? options : undefined,
     conversationId,
   };
 }
@@ -222,25 +281,19 @@ export const handleMessage = asyncHandler(async (req, res) => {
   const conversation = getOrCreateConversation(inputConversationId, userId);
   const { conversationId } = conversation;
 
+  // The user's own categories — used both to steer the AI and to validate
+  // its answer (we only accept categories the user actually has).
+  const userCategories = await fetchUserCategories(userId);
+
   // Step 2: Call AI to extract expense data from the message
   // Pass the user's own categories so the AI matches against them first
   // and only invents a new name when nothing fits.
   // AI service already validates the response with Zod
   let aiResult;
   try {
-    const userCategories = await Category.find({
-      userId,
-      hidden: { $ne: true },
-    })
-      .select("name type")
-      .lean();
     aiResult = await extractExpenseData(message, {
-      expenseCategories: userCategories
-        .filter((c) => c.type === "expense")
-        .map((c) => c.name),
-      incomeCategories: userCategories
-        .filter((c) => c.type === "income")
-        .map((c) => c.name),
+      expenseCategories: userCategories.expense,
+      incomeCategories: userCategories.income,
     });
   } catch (error) {
     console.error("AI extraction failed:", error);
@@ -297,7 +350,12 @@ export const handleMessage = asyncHandler(async (req, res) => {
       if (missingFields.length > 0) {
         return res.json({
           success: true,
-          data: createQuestionResponse(missingFields[0], conversationId, conversation.draft.type),
+          data: createQuestionResponse(
+            missingFields[0],
+            conversationId,
+            conversation.draft.type,
+            categoriesForType(userCategories, conversation.draft.type)
+          ),
         });
       }
     }
@@ -322,33 +380,26 @@ export const handleMessage = asyncHandler(async (req, res) => {
       draft: { ...updatedState.draft, type: transactionType }
     });
   }
-  // Step 6: Check for missing required fields
+
+  // Step 6: Only accept a category the user actually has. If the AI guessed
+  // one that isn't in the user's list, drop it so we fall through to asking
+  // the user to pick from their own categories via a dropdown.
   const currentDraft = updatedState.draft;
-  const missingFields = getMissingFields(currentDraft);
-
-  // Step 7: If fields are missing, ask for the next one
-  if (missingFields.length > 0) {
-    updateConversation(conversationId, {
-      status: "COLLECTING",
-      missingFields,
-    });
-
-    return res.json({
-      success: true,
-      data: createQuestionResponse(missingFields[0], conversationId, currentDraft.type),
+  const categoryNames = categoriesForType(userCategories, currentDraft.type);
+  // Only constrain to the user's list when they actually have categories of
+  // this type; otherwise accept the AI's suggestion (nothing to pick from).
+  if (
+    categoryNames.length > 0 &&
+    currentDraft.category &&
+    !isKnownCategory(currentDraft.category, categoryNames)
+  ) {
+    updatedState = updateConversation(conversationId, {
+      draft: { ...currentDraft, category: null },
     });
   }
 
-  // Step 8: All required fields present - ask for confirmation
-  updateConversation(conversationId, {
-    status: "READY_TO_CONFIRM",
-    missingFields: [],
-  });
-
-  return res.json({
-    success: true,
-    data: createConfirmationResponse(currentDraft, conversationId),
-  });
+  // Step 7: Ask for the next missing field (with category options) or confirm.
+  return sendNextStep(res, conversationId, updatedState.draft, categoryNames);
 });
 
 /**
@@ -415,6 +466,50 @@ export const cancelConversation = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/chat/select-category
+ * Deterministically set the category from the user's own list (no AI).
+ * Used when the bot offered a category dropdown and the user picked one.
+ *
+ * Body: { conversationId: string, category: string }
+ */
+export const selectCategory = asyncHandler(async (req, res) => {
+  const { conversationId: inputConversationId, category } = req.body;
+  const userId = req.user.id;
+
+  if (!inputConversationId || !category) {
+    return res.status(400).json({
+      success: false,
+      error: "conversationId and category are required",
+    });
+  }
+
+  const conversation = getOrCreateConversation(inputConversationId, userId);
+  const { conversationId } = conversation;
+
+  // Validate the picked category is one of the user's own categories
+  // for the current draft type.
+  const userCategories = await fetchUserCategories(userId);
+  const draftType = conversation.draft.type || "expense";
+  const categoryNames = categoriesForType(userCategories, draftType);
+
+  if (!isKnownCategory(category, categoryNames)) {
+    return res.status(400).json({
+      success: false,
+      error: "That category isn't in your categories.",
+      conversationId,
+    });
+  }
+
+  // Use the user's exact spelling, then move the conversation forward.
+  const exactName = categoryNames.find(
+    (n) => n.toLowerCase() === String(category).toLowerCase()
+  );
+  const updatedState = mergeDraftData(conversationId, { category: exactName });
+
+  return sendNextStep(res, conversationId, updatedState.draft, categoryNames);
+});
+
+/**
  * POST /api/chat/start
  * Start a new conversation
  */
@@ -436,5 +531,6 @@ export default {
   handleMessage,
   getConversationState,
   cancelConversation,
+  selectCategory,
   startConversation,
 };

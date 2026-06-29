@@ -43,6 +43,56 @@ const duplicatePeriodMessage = (s, e) => {
   return "You already have a budget for this period";
 };
 
+// -------------------- Input sanitizing / validation -------------------- //
+// Only these fields may be written by the client. Anything else (userId, _id,
+// timestamps, injected flags) is dropped so a payload can't reassign ownership
+// or corrupt server-managed fields.
+const BUDGET_EDITABLE_FIELDS = ["name", "totalBudget", "categories", "startDate", "endDate"];
+
+const pickBudgetFields = (body = {}) => {
+  const out = {};
+  for (const key of BUDGET_EDITABLE_FIELDS) {
+    if (body[key] !== undefined) out[key] = body[key];
+  }
+  return out;
+};
+
+// Returns an error string if the payload is invalid, otherwise null. Normalizes
+// category amounts to numbers so the category-sum check can't be fooled by
+// undefined/NaN values slipping through.
+const validateBudgetPayload = (fields, { requireAll = false } = {}) => {
+  const { name, totalBudget, categories, startDate, endDate } = fields;
+
+  if (requireAll) {
+    if (!name || !String(name).trim()) return "Budget name is required";
+    if (totalBudget === undefined) return "Total budget is required";
+    if (!startDate || !endDate) return "Start and end dates are required";
+  }
+
+  if (totalBudget !== undefined && (!Number.isFinite(Number(totalBudget)) || Number(totalBudget) < 0)) {
+    return "Total budget must be a positive number";
+  }
+
+  if (categories !== undefined) {
+    if (!Array.isArray(categories)) return "Categories must be a list";
+    for (const c of categories) {
+      if (!c || !c.category || !String(c.category).trim()) return "Each category needs a name";
+      const amt = Number(c.amount);
+      if (!Number.isFinite(amt) || amt < 0) return `Invalid amount for category "${c.category}"`;
+    }
+    const categorySum = categories.reduce((sum, c) => sum + Number(c.amount || 0), 0);
+    if (totalBudget !== undefined && categorySum > Number(totalBudget)) {
+      return "Sum of category budgets cannot exceed total budget";
+    }
+  }
+
+  if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+    return "Start date must be before end date";
+  }
+
+  return null;
+};
+
 // Find an existing budget for the user covering the exact same calendar range
 // (same month / same year). Monthly and yearly budgets have distinct ranges,
 // so they never collide with each other. `excludeId` skips the budget being
@@ -68,31 +118,21 @@ const findDuplicatePeriodBudget = async (userId, startDate, endDate, excludeId =
 // Add Budget
 export const addBudget = async (req, res) => {
   try {
-    const { name, totalBudget, categories, startDate, endDate } = req.body;
     const userId = req.user.id; // Get userId from JWT token
+    const fields = pickBudgetFields(req.body);
 
-    // validation: sum of categories should not exceed total
-    const categorySum = categories?.reduce((sum, c) => sum + c.amount, 0) || 0;
-    if (categorySum > totalBudget) {
-      return res.status(400).json({
-        message: "Sum of category budgets cannot exceed total budget",
-      });
+    const validationError = validateBudgetPayload(fields, { requireAll: true });
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
     }
 
     // Block a second budget for the same month / year.
-    const duplicate = await findDuplicatePeriodBudget(userId, startDate, endDate);
+    const duplicate = await findDuplicatePeriodBudget(userId, fields.startDate, fields.endDate);
     if (duplicate) {
-      return res.status(409).json({ message: duplicatePeriodMessage(startDate, endDate) });
+      return res.status(409).json({ message: duplicatePeriodMessage(fields.startDate, fields.endDate) });
     }
 
-    const newBudget = new Budget({
-      userId,
-      name,
-      totalBudget,
-      categories,
-      startDate,
-      endDate,
-    });
+    const newBudget = new Budget({ userId, ...fields });
 
     await newBudget.save();
     res.status(201).json({ success: true, data: newBudget });
@@ -116,12 +156,34 @@ export const getBudgets = async (req, res) => {
 
     const results = [];
 
-    for (const budget of budgets) {
-      // fetch transactions within budget period
-      const transactions = await transactionModel.find({
+    // Fetch every relevant transaction ONCE across the union of all budget
+    // periods, then bucket per budget in memory. Avoids an N+1 query per
+    // budget. Planned/future event spends are excluded — they aren't real
+    // spending yet and would inflate the budget's used amount.
+    let allTransactions = [];
+    if (budgets.length > 0) {
+      const minStart = budgets.reduce(
+        (m, b) => (b.startDate < m ? b.startDate : m),
+        budgets[0].startDate
+      );
+      const maxEnd = budgets.reduce(
+        (m, b) => (b.endDate > m ? b.endDate : m),
+        budgets[0].endDate
+      );
+      allTransactions = await transactionModel.find({
         userId,
-        date: { $gte: budget.startDate, $lte: budget.endDate },
+        isPlanned: { $ne: true },
+        type: "expense",
+        date: { $gte: minStart, $lte: maxEnd },
       });
+    }
+
+    for (const budget of budgets) {
+      // Transactions that fall inside this budget's window (budgets can
+      // overlap, e.g. a monthly budget within a yearly one).
+      const transactions = allTransactions.filter(
+        (t) => t.date >= budget.startDate && t.date <= budget.endDate
+      );
 
       // total spent
       const totalSpent = transactions.reduce(
@@ -174,34 +236,42 @@ export const getBudgets = async (req, res) => {
 // Update Budget
 export const updateBudget = async (req, res) => {
   try {
-    const { totalBudget, categories, startDate, endDate } = req.body;
     const userId = req.user.id; // Get userId from JWT token
+    const fields = pickBudgetFields(req.body);
 
-    // validation: sum of categories should not exceed total
-    const categorySum = categories?.reduce((sum, c) => sum + c.amount, 0) || 0;
-    if (categorySum > totalBudget) {
-      return res.status(400).json({
-        message: "Sum of category budgets cannot exceed total budget",
-      });
+    // For a category-sum check on a partial update we need the existing
+    // totalBudget when the client didn't resend it.
+    const existing = await Budget.findOne({ _id: req.params.id, userId });
+    if (!existing) return res.status(404).json({ message: "Budget not found" });
+
+    const merged = {
+      totalBudget: fields.totalBudget !== undefined ? fields.totalBudget : existing.totalBudget,
+      categories: fields.categories !== undefined ? fields.categories : existing.categories,
+      startDate: fields.startDate || existing.startDate,
+      endDate: fields.endDate || existing.endDate,
+      name: fields.name !== undefined ? fields.name : existing.name,
+    };
+
+    const validationError = validateBudgetPayload(merged);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
     }
 
     // If the period changed, block colliding with another month/year budget
     // (excluding this one).
-    if (startDate && endDate) {
-      const duplicate = await findDuplicatePeriodBudget(userId, startDate, endDate, req.params.id);
+    if (fields.startDate && fields.endDate) {
+      const duplicate = await findDuplicatePeriodBudget(userId, fields.startDate, fields.endDate, req.params.id);
       if (duplicate) {
-        return res.status(409).json({ message: duplicatePeriodMessage(startDate, endDate) });
+        return res.status(409).json({ message: duplicatePeriodMessage(fields.startDate, fields.endDate) });
       }
     }
 
-    // Only update budget if it belongs to the user
+    // Only the whitelisted fields are written — never the raw body.
     const updated = await Budget.findOneAndUpdate(
       { _id: req.params.id, userId },
-      req.body,
-      { new: true }
+      { $set: fields },
+      { new: true, runValidators: true }
     );
-
-    if (!updated) return res.status(404).json({ message: "Budget not found" });
 
     res.json({ success: true, data: updated });
   } catch (error) {

@@ -10,6 +10,7 @@ import {
   handleMessage,
   getConversationState,
   cancelConversation,
+  selectCategory,
   startConversation,
 } from "../controllers/chatController.js";
 
@@ -42,6 +43,15 @@ router.post("/start", startConversation);
  * Body: { conversationId: string }
  */
 router.post("/cancel", cancelConversation);
+
+/**
+ * POST /api/chat/select-category
+ * Set the category from the user's own list (no AI). Used when the bot
+ * offered a category dropdown.
+ *
+ * Body: { conversationId: string, category: string }
+ */
+router.post("/select-category", selectCategory);
 
 /**
  * GET /api/chat/conversation/:id

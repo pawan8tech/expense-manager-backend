@@ -57,7 +57,9 @@ export const getReports = asyncHandler(async (req, res) => {
   // applied on the client over the data we return below.
   const { startDate, endDate, granularity = "month" } = req.query;
 
-  const filter = { userId: req.user.id };
+  // Planned/future event spends are excluded from reports — they aren't real
+  // cashflow yet and would distort net / savings-rate figures.
+  const filter = { userId: req.user.id, isPlanned: { $ne: true } };
 
   if (startDate || endDate) {
     filter.date = {};
