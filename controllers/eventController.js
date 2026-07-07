@@ -441,20 +441,28 @@ export const deleteEventTransaction = async (req, res) => {
 };
 
 // ===================================
-// Event Funding
+// Event Funding Plan (planning only — no transactions/balance impact)
 // ===================================
 
+// Keep savedAmount in sync as the sum of "received" funding sources.
+const syncSavedAmount = (event) => {
+  event.savedAmount = (event.fundingSources || [])
+    .filter((f) => f.status === "received")
+    .reduce((sum, f) => sum + (f.amount || 0), 0);
+};
+
 /**
- * Add funds toward an event (increase savedAmount). Mirrors a savings
- * contribution: records a `saving` transaction so cashflow reports stay
- * accurate, and bumps the event's savedAmount.
+ * Add a funding source to the plan (who's providing money, how much, and
+ * whether it's received or expected). Planning only — doesn't touch balance.
  * POST /api/events/:id/fund
  */
-export const fundEvent = async (req, res) => {
+export const addFundingSource = async (req, res) => {
   try {
-    const { amount, note, date } = req.body;
-
-    if (!amount || amount <= 0) {
+    const { source, amount, status, date, note } = req.body;
+    if (!source || !String(source).trim()) {
+      return res.status(400).json({ success: false, message: "Source is required" });
+    }
+    if (!(Number(amount) > 0)) {
       return res.status(400).json({ success: false, message: "Amount must be positive" });
     }
 
@@ -463,23 +471,81 @@ export const fundEvent = async (req, res) => {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
-    const transaction = await Transaction.create({
-      userId: req.user.id,
-      type: "saving",
-      name: `Funding: ${event.name}`,
-      amount,
-      category: "Event Fund",
-      note: note || `Saved toward ${event.name}`,
-      date: date || new Date(),
-      eventId: event._id,
+    event.fundingSources.push({
+      source: String(source).trim(),
+      amount: Number(amount),
+      status: status === "expected" ? "expected" : "received",
+      date: date || undefined,
+      note: note || undefined,
     });
-
-    event.savedAmount = Number(event.savedAmount) + Number(amount);
+    syncSavedAmount(event);
     if (event.status === "planning") event.status = "active";
     await event.save();
 
-    res.status(201).json({ success: true, data: { event, transaction } });
+    res.status(201).json({ success: true, data: event });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Error funding event", error: error.message });
+    res.status(500).json({ success: false, message: "Error adding funding source", error: error.message });
+  }
+};
+
+/**
+ * Update a funding source — e.g. flip "expected" → "received" when the money
+ * arrives, or fix an amount.
+ * PUT /api/events/:id/fund/:fundId
+ */
+export const updateFundingSource = async (req, res) => {
+  try {
+    const { source, amount, status, date, note } = req.body;
+
+    const event = await Event.findOne({ _id: req.params.id, userId: req.user.id });
+    if (!event) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+    const fs = event.fundingSources.id(req.params.fundId);
+    if (!fs) {
+      return res.status(404).json({ success: false, message: "Funding source not found" });
+    }
+
+    if (source !== undefined) {
+      if (!String(source).trim()) return res.status(400).json({ success: false, message: "Source cannot be empty" });
+      fs.source = String(source).trim();
+    }
+    if (amount !== undefined) {
+      if (!(Number(amount) > 0)) return res.status(400).json({ success: false, message: "Amount must be positive" });
+      fs.amount = Number(amount);
+    }
+    if (status !== undefined) fs.status = status === "expected" ? "expected" : "received";
+    if (date !== undefined) fs.date = date || undefined;
+    if (note !== undefined) fs.note = note;
+
+    syncSavedAmount(event);
+    await event.save();
+
+    res.json({ success: true, data: event });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error updating funding source", error: error.message });
+  }
+};
+
+/**
+ * Remove a funding source from the plan.
+ * DELETE /api/events/:id/fund/:fundId
+ */
+export const deleteFundingSource = async (req, res) => {
+  try {
+    const event = await Event.findOne({ _id: req.params.id, userId: req.user.id });
+    if (!event) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+    if (!event.fundingSources.id(req.params.fundId)) {
+      return res.status(404).json({ success: false, message: "Funding source not found" });
+    }
+    event.fundingSources.pull(req.params.fundId);
+    syncSavedAmount(event);
+    await event.save();
+
+    res.json({ success: true, data: event });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error deleting funding source", error: error.message });
   }
 };

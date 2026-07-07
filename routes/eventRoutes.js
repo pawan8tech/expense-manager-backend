@@ -16,7 +16,9 @@ import {
   confirmPlannedTransaction,
   updateEventTransaction,
   deleteEventTransaction,
-  fundEvent,
+  addFundingSource,
+  updateFundingSource,
+  deleteFundingSource,
 } from "../controllers/eventController.js";
 import validateToken from "../middleware/validateTokenHandler.js";
 
@@ -45,7 +47,11 @@ router.patch("/:id/transactions/:txId/confirm", confirmPlannedTransaction);
 // DELETE /api/events/:id/transactions/:txId - remove a linked transaction
 router.route("/:id/transactions/:txId").put(updateEventTransaction).delete(deleteEventTransaction);
 
-// POST /api/events/:id/fund - add funds toward the event
-router.post("/:id/fund", fundEvent);
+// Funding plan — sources of money for the event (planning only)
+// POST   /api/events/:id/fund          - add a funding source
+// PUT    /api/events/:id/fund/:fundId  - update a funding source
+// DELETE /api/events/:id/fund/:fundId  - remove a funding source
+router.post("/:id/fund", addFundingSource);
+router.route("/:id/fund/:fundId").put(updateFundingSource).delete(deleteFundingSource);
 
 export default router;

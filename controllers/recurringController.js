@@ -22,6 +22,38 @@ const pickEditable = (body = {}) => {
   return out;
 };
 
+const REC_TYPES = ["income", "expense"];
+const REC_FREQ = ["daily", "weekly", "monthly", "yearly"];
+
+// Validate a recurring-rule payload. Returns an error string, or null if valid.
+const validateRecurringPayload = (fields, { requireAll = false } = {}) => {
+  const { name, type, amount, category, frequency, interval, startDate, endDate } = fields;
+
+  if (requireAll) {
+    if (!name || !String(name).trim()) return "Name is required";
+    if (type === undefined) return "Type is required";
+    if (amount === undefined || amount === null || amount === "") return "Amount is required";
+    if (!category || !String(category).trim()) return "Category is required";
+    if (!frequency) return "Frequency is required";
+    if (!startDate) return "Start date is required";
+  }
+
+  if (type !== undefined && !REC_TYPES.includes(type)) return "Invalid type";
+  if (amount !== undefined && (!Number.isFinite(Number(amount)) || Number(amount) <= 0)) {
+    return "Amount must be a positive number";
+  }
+  if (frequency !== undefined && !REC_FREQ.includes(frequency)) return "Invalid frequency";
+  if (interval !== undefined && (!Number.isInteger(Number(interval)) || Number(interval) < 1)) {
+    return "Interval must be a whole number of at least 1";
+  }
+  if (name !== undefined && !String(name).trim()) return "Name cannot be empty";
+  if (category !== undefined && !String(category).trim()) return "Category cannot be empty";
+  if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+    return "Start date must be before end date";
+  }
+  return null;
+};
+
 const sameDate = (a, b) => {
   if (!a && !b) return true;
   if (!a || !b) return false;
@@ -97,6 +129,10 @@ export const generateDueTransactions = async (userId) => {
 export const addRecurring = async (req, res) => {
   try {
     const payload = pickEditable(req.body);
+    const error = validateRecurringPayload(payload, { requireAll: true });
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
     const rule = await RecurringRule.create({
       ...payload,
       userId: req.user.id,
@@ -204,6 +240,11 @@ export const updateRecurring = async (req, res) => {
     }
 
     const updates = pickEditable(req.body);
+
+    const validationError = validateRecurringPayload(updates);
+    if (validationError) {
+      return res.status(400).json({ success: false, message: validationError });
+    }
 
     const scheduleChanged = SCHEDULE_FIELDS.some((field) => {
       if (!(field in updates)) return false;

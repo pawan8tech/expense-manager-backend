@@ -9,6 +9,7 @@ import {
   getGoals,
   getGoalById,
   updateGoal,
+  updateGoalValue,
   updateGoalStatus,
   deleteGoal,
   contributeToGoal,
@@ -41,6 +42,9 @@ router.route("/:id")
 
 // PATCH /api/savings-goals/:id/status - Update goal status
 router.patch("/:id/status", updateGoalStatus);
+
+// PATCH /api/savings-goals/:id/value - Update an investment's current value
+router.patch("/:id/value", updateGoalValue);
 
 // ===================================
 // Contribution Routes

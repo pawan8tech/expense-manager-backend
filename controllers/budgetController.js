@@ -170,19 +170,30 @@ export const getBudgets = async (req, res) => {
         (m, b) => (b.endDate > m ? b.endDate : m),
         budgets[0].endDate
       );
+      // Include the whole final day — endDate is stored at midnight, so a
+      // plain `<=` would drop spending made later on the last day (e.g. today).
+      const maxEndInclusive = new Date(maxEnd);
+      maxEndInclusive.setHours(23, 59, 59, 999);
       allTransactions = await transactionModel.find({
         userId,
         isPlanned: { $ne: true },
+        // Event-linked spends belong to that event's own budget, not the
+        // monthly budget. `eventId: null` also matches legacy transactions
+        // that predate the field. Event spends still appear in the
+        // transaction list, balance, and reports — just not here.
+        eventId: null,
         type: "expense",
-        date: { $gte: minStart, $lte: maxEnd },
+        date: { $gte: minStart, $lte: maxEndInclusive },
       });
     }
 
     for (const budget of budgets) {
-      // Transactions that fall inside this budget's window (budgets can
-      // overlap, e.g. a monthly budget within a yearly one).
+      // Transactions that fall inside this budget's window. The end is made
+      // inclusive of the whole last day so same-day spending isn't dropped.
+      const periodEnd = new Date(budget.endDate);
+      periodEnd.setHours(23, 59, 59, 999);
       const transactions = allTransactions.filter(
-        (t) => t.date >= budget.startDate && t.date <= budget.endDate
+        (t) => t.date >= budget.startDate && t.date <= periodEnd
       );
 
       // total spent

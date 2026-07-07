@@ -6,6 +6,122 @@
 import SavingsGoal from "../models/savingGoalModel.js";
 import Contribution from "../models/contributionModel.js";
 import Transaction from "../models/transactionModel.js";
+import Account from "../models/accountModel.js";
+import { ensureUserAccounts } from "./accountController.js";
+
+// Resolve a usable account id: the one provided (if it belongs to the user),
+// otherwise the user's default account. Savings movements are transfers to/from
+// a real account so balances and net worth stay correct.
+const resolveAccountId = async (userId, accountId) => {
+  if (accountId) {
+    const acc = await Account.findOne({ _id: accountId, userId });
+    if (acc) return acc._id;
+  }
+  const def = await ensureUserAccounts(userId);
+  return def?._id || null;
+};
+
+// ===================================
+// SIP (automatic recurring contribution) generation
+// ===================================
+
+const stepDate = (date, frequency) => {
+  const d = new Date(date);
+  if (frequency === "daily") d.setDate(d.getDate() + 1);
+  else if (frequency === "weekly") d.setDate(d.getDate() + 7);
+  else if (frequency === "yearly") d.setFullYear(d.getFullYear() + 1);
+  else d.setMonth(d.getMonth() + 1); // monthly (default)
+  return d;
+};
+
+/**
+ * Materialize any due SIP contributions for a user's active goals. Lazy —
+ * called when goals are read (same pattern as recurring transactions). For
+ * each scheduled date from the SIP's last run up to today it records a
+ * contribution, a `saving` transaction, and bumps the goal (and, for
+ * investments, its current value).
+ */
+const generateDueSips = async (userId) => {
+  const goals = await SavingsGoal.find({
+    userId,
+    status: "active",
+    sipEnabled: true,
+    sipAmount: { $gt: 0 },
+  });
+
+  const today = new Date();
+  let defaultAccountId = null;
+
+  for (const goal of goals) {
+    let next = goal.sipLastRun
+      ? stepDate(goal.sipLastRun, goal.sipFrequency)
+      : new Date(goal.sipStartDate || goal.startDate || today);
+
+    const isInvestment = goal.type === "investment";
+    // Investments pull real money from an account; goals just reserve.
+    let srcAccountId = null;
+    if (isInvestment) {
+      srcAccountId = goal.sipAccountId;
+      if (!srcAccountId) {
+        if (!defaultAccountId) defaultAccountId = (await ensureUserAccounts(userId))?._id || null;
+        srcAccountId = defaultAccountId;
+      }
+    }
+
+    let ran = false;
+    let guard = 0;
+    while (next <= today && guard++ < 600) {
+      await Contribution.create({
+        userId,
+        savingsGoalId: goal._id,
+        amount: goal.sipAmount,
+        type: "deposit",
+        note: `SIP contribution to ${goal.name}`,
+        date: next,
+      });
+      if (isInvestment) {
+        // Money leaves the source account into the investment (one-sided
+        // transfer, isolated from income/expense).
+        await Transaction.create({
+          userId,
+          type: "transfer",
+          amount: goal.sipAmount,
+          name: goal.name,
+          category: "Investment",
+          note: `SIP contribution to ${goal.name}`,
+          date: next,
+          accountId: srcAccountId,
+          savingsGoalId: goal._id,
+        });
+        goal.currentValue = Number(goal.currentValue) + Number(goal.sipAmount);
+      }
+      // Goals just reserve more of their held-in account (no money moves).
+      goal.savedAmount = Number(goal.savedAmount) + Number(goal.sipAmount);
+      goal.sipLastRun = next;
+      ran = true;
+      next = stepDate(next, goal.sipFrequency);
+    }
+
+    // Auto-complete a target goal that the SIP pushed over the line.
+    if (goal.type === "goal" && goal.targetAmount > 0 && goal.savedAmount >= goal.targetAmount) {
+      goal.status = "completed";
+    }
+
+    if (ran) await goal.save();
+  }
+};
+
+// Normalize SIP-related fields from a request body.
+const pickSipFields = (body = {}) => {
+  const enabled = !!body.sipEnabled;
+  return {
+    sipEnabled: enabled,
+    sipAmount: enabled ? Number(body.sipAmount) || 0 : 0,
+    sipFrequency: body.sipFrequency || "monthly",
+    sipStartDate: enabled ? body.sipStartDate || new Date() : undefined,
+    sipAccountId: enabled ? body.sipAccountId || null : null,
+  };
+};
 
 // ===================================
 // Goal CRUD Operations
@@ -17,17 +133,47 @@ import Transaction from "../models/transactionModel.js";
  */
 export const createGoal = async (req, res) => {
   try {
-    const { name, category, targetAmount, targetDate, color } = req.body;
-    
-    const goal = await SavingsGoal.create({ 
-      userId: req.user.id, 
-      name, 
-      category, 
-      targetAmount, 
+    const { name, assetType, targetAmount, targetDate, color, savedAmount, currentValue } = req.body;
+    const type = req.body.type === "investment" ? "investment" : "goal";
+
+    // Validation
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, message: "Name is required" });
+    }
+    const nonNeg = (v) => v === undefined || v === null || v === "" || (Number.isFinite(Number(v)) && Number(v) >= 0);
+    if (![targetAmount, savedAmount, currentValue].every(nonNeg)) {
+      return res.status(400).json({ success: false, message: "Amounts must be non-negative numbers" });
+    }
+    if (type === "goal" && !(Number(targetAmount) > 0)) {
+      return res.status(400).json({ success: false, message: "A goal needs a positive target amount" });
+    }
+    if (req.body.sipEnabled && !(Number(req.body.sipAmount) > 0)) {
+      return res.status(400).json({ success: false, message: "SIP amount must be positive" });
+    }
+
+    const invested = Number(savedAmount) || 0;
+
+    // A goal earmarks money inside a real account — default to the user's
+    // default account if none chosen. Investments don't use a held-in account.
+    const heldInAccountId =
+      type === "goal" ? await resolveAccountId(req.user.id, req.body.heldInAccountId) : null;
+
+    const goal = await SavingsGoal.create({
+      userId: req.user.id,
+      name,
+      type,
+      assetType: type === "investment" ? (assetType || "other") : undefined,
+      targetAmount: Number(targetAmount) || 0,
       targetDate,
-      color
+      color,
+      heldInAccountId,
+      // Allow recording an existing holding (invested + current value) on
+      // create. For a plain goal these stay 0 and grow via contributions.
+      savedAmount: invested,
+      currentValue: type === "investment" ? (currentValue !== undefined ? Number(currentValue) : invested) : 0,
+      ...pickSipFields(req.body),
     });
-    
+
     res.status(201).json({ success: true, data: goal });
   } catch (error) {
     res.status(500).json({ success: false, message: "Error creating goal", error: error.message });
@@ -40,6 +186,9 @@ export const createGoal = async (req, res) => {
  */
 export const getGoals = async (req, res) => {
   try {
+    // Materialize any due SIP contributions before reading.
+    await generateDueSips(req.user.id);
+
     const goals = await SavingsGoal.find({ userId: req.user.id })
       .sort({ createdAt: -1 });
 
@@ -47,6 +196,12 @@ export const getGoals = async (req, res) => {
     const totalCompleted = goals.filter(g => g.status === "completed").length;
     const totalSavings = goals.reduce((sum, g) => sum + g.savedAmount, 0);
     const totalTarget = goals.reduce((sum, g) => sum + g.targetAmount, 0);
+
+    // Investment roll-up: invested vs current value vs returns.
+    const investments = goals.filter(g => g.type === "investment");
+    const totalInvested = investments.reduce((sum, g) => sum + (g.savedAmount || 0), 0);
+    const totalInvestmentValue = investments.reduce((sum, g) => sum + (g.currentValue || 0), 0);
+    const totalReturns = totalInvestmentValue - totalInvested;
 
     // Net amount saved this calendar month (deposits minus withdrawals) so the
     // "This Month" card on the Savings page reflects real activity.
@@ -70,7 +225,10 @@ export const getGoals = async (req, res) => {
         totalCompleted,
         totalSavings,
         totalTarget,
-        savedThisMonth
+        savedThisMonth,
+        totalInvested,
+        totalInvestmentValue,
+        totalReturns
       },
       data: goals
     });
@@ -116,14 +274,20 @@ export const getGoalById = async (req, res) => {
  */
 export const updateGoal = async (req, res) => {
   try {
-    const { name, category, targetAmount, targetDate, color } = req.body;
-    
+    const { name, assetType, targetAmount, targetDate, color, type, currentValue } = req.body;
+
+    const update = { name, targetAmount, targetDate, color, ...pickSipFields(req.body) };
+    if (type === "goal" || type === "investment") update.type = type;
+    if (assetType !== undefined) update.assetType = assetType;
+    if (currentValue !== undefined) update.currentValue = Number(currentValue) || 0;
+    if (req.body.heldInAccountId !== undefined) update.heldInAccountId = req.body.heldInAccountId || null;
+
     const goal = await SavingsGoal.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.id },
-      { name, category, targetAmount, targetDate, color },
+      update,
       { new: true, runValidators: true }
     );
-    
+
     if (!goal) {
       return res.status(404).json({ success: false, message: "Goal not found" });
     }
@@ -131,6 +295,34 @@ export const updateGoal = async (req, res) => {
     res.json({ success: true, data: goal });
   } catch (error) {
     res.status(500).json({ success: false, message: "Error updating goal", error: error.message });
+  }
+};
+
+/**
+ * Update an investment's current market value (no money moves — this just
+ * reflects gains/losses). Returns are recomputed against the invested amount.
+ * PATCH /api/savings-goals/:id/value
+ */
+export const updateGoalValue = async (req, res) => {
+  try {
+    const { currentValue } = req.body;
+    if (currentValue === undefined || Number(currentValue) < 0) {
+      return res.status(400).json({ success: false, message: "A valid current value is required" });
+    }
+
+    const goal = await SavingsGoal.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user.id },
+      { currentValue: Number(currentValue) },
+      { new: true }
+    );
+
+    if (!goal) {
+      return res.status(404).json({ success: false, message: "Goal not found" });
+    }
+
+    res.json({ success: true, data: goal });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error updating value", error: error.message });
   }
 };
 
@@ -230,23 +422,31 @@ export const contributeToGoal = async (req, res) => {
       date: date || new Date()
     });
 
-    // Create savings transaction for tracking
-    const transaction = await Transaction.create({
-      userId: req.user.id,
-      type: "saving",
-      amount,
-      name: goal.name,
-      category: goal.category,
-      note: note || `Contribution to ${goal.name}`,
-      date: date || new Date(),
-      savingsGoalId: goalId
-    });
+    // Investment → real money leaves the chosen account to buy the asset (a
+    // one-sided transfer). Goal → the money stays put; we just reserve more of
+    // its held-in account (no transaction, no balance change).
+    let transaction = null;
+    if (goal.type === "investment") {
+      const srcAccountId = await resolveAccountId(req.user.id, req.body.accountId);
+      transaction = await Transaction.create({
+        userId: req.user.id,
+        type: "transfer",
+        amount,
+        name: goal.name,
+        category: "Investment",
+        note: note || `Contribution to ${goal.name}`,
+        date: date || new Date(),
+        accountId: srcAccountId,
+        savingsGoalId: goalId
+      });
+      goal.currentValue = Number(goal.currentValue) + Number(amount);
+    }
 
-    // Update goal savedAmount
+    // Reserve more toward the goal (or record the invested amount).
     goal.savedAmount = Number(goal.savedAmount) + Number(amount);
-    
-    // Auto-complete if target reached
-    if (goal.savedAmount >= goal.targetAmount) {
+
+    // Auto-complete a target goal once it's reached.
+    if (goal.type === "goal" && goal.targetAmount > 0 && goal.savedAmount >= goal.targetAmount) {
       goal.status = "completed";
     }
     await goal.save();
@@ -270,15 +470,8 @@ export const contributeToGoal = async (req, res) => {
  */
 export const withdrawFromGoal = async (req, res) => {
   try {
-    const { amount, note, date, mode } = req.body;
+    const { amount, note, date } = req.body;
     const goalId = req.params.id || req.body.goalId;
-
-    // How the withdrawn money is recorded as a transaction:
-    //   "balance"  -> income (money returns to the current balance — this
-    //                 reverses the original contribution, so saving then
-    //                 withdrawing nets to zero on the balance). Default.
-    //   "expense"  -> expense (the user is spending the saved money directly).
-    const withdrawMode = mode === "expense" ? "expense" : "balance";
 
     // Validate amount
     if (!amount || amount <= 0) {
@@ -286,15 +479,15 @@ export const withdrawFromGoal = async (req, res) => {
     }
 
     // Find the goal
-    const goal = await SavingsGoal.findOne({ 
-      _id: goalId, 
-      userId: req.user.id 
+    const goal = await SavingsGoal.findOne({
+      _id: goalId,
+      userId: req.user.id
     });
-    
+
     if (!goal) {
       return res.status(404).json({ success: false, message: "Goal not found" });
     }
-    
+
     if (goal.status !== "active") {
       return res.status(400).json({ success: false, message: "Goal is not active" });
     }
@@ -315,49 +508,32 @@ export const withdrawFromGoal = async (req, res) => {
 
     const when = date || new Date();
 
-    // Always credit the money back to the current balance first as income —
-    // this reverses the original contribution, so the balance is made whole.
-    const incomeTransaction = await Transaction.create({
-      userId: req.user.id,
-      type: "income",
-      amount,
-      name: goal.name,
-      category: "Savings Withdrawal",
-      note: note || `Withdrawal from ${goal.name}`,
-      date: when,
-      savingsGoalId: goalId
-    });
-
-    // For "Spend it", also record the matching expense, so the purchase shows
-    // up in reports. Income (+) and expense (−) of the same amount cancel on
-    // the balance — that's what prevents the double-count.
-    let expenseTransaction = null;
-    if (withdrawMode === "expense") {
-      expenseTransaction = await Transaction.create({
+    // Investment → redeeming brings real money back INTO the chosen account (a
+    // one-sided transfer). Goal → just release the reservation (no money moves;
+    // it was already sitting in the held-in account).
+    let transaction = null;
+    if (goal.type === "investment") {
+      const destAccountId = await resolveAccountId(req.user.id, req.body.accountId);
+      transaction = await Transaction.create({
         userId: req.user.id,
-        type: "expense",
+        type: "transfer",
         amount,
         name: goal.name,
-        category: goal.category,
-        note: note || `Spent from ${goal.name}`,
+        category: "Investment",
+        note: note || `Withdrawal from ${goal.name}`,
         date: when,
+        toAccountId: destAccountId,
         savingsGoalId: goalId
       });
+      goal.currentValue = Math.max(0, Number(goal.currentValue) - Number(amount));
     }
 
-    // Update goal savedAmount
-    goal.savedAmount = Number(goal.savedAmount) - Number(amount);
+    goal.savedAmount = Math.max(0, Number(goal.savedAmount) - Number(amount));
     await goal.save();
 
     res.status(201).json({
       success: true,
-      data: {
-        goal,
-        contribution,
-        transaction: incomeTransaction,
-        incomeTransaction,
-        expenseTransaction
-      }
+      data: { goal, contribution, transaction }
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Error withdrawing from goal", error: error.message });

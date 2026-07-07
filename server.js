@@ -19,6 +19,10 @@ import eventRoutes from './routes/eventRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
 import reportsRoutes from './routes/reportsRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
+import accountRoutes from './routes/accountRoutes.js';
+import debtRoutes from './routes/debtRoutes.js';
+import billRoutes from './routes/billRoutes.js';
+import lendingRoutes from './routes/lendingRoutes.js';
 import cookieParser from "cookie-parser";
 
 
@@ -51,6 +55,10 @@ app.use("/api/users", userRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/categories", categoryRoutes);
+app.use("/api/accounts", accountRoutes);
+app.use("/api/debts", debtRoutes);
+app.use("/api/bills", billRoutes);
+app.use("/api/lendings", lendingRoutes);
 
 
 // Connect to MongoDB

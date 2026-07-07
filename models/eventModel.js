@@ -24,6 +24,19 @@ const EventCategorySchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A funding source toward the event — who/what is providing money, how much,
+// and whether it's already in hand ("received") or still coming ("expected").
+const FundingSourceSchema = new mongoose.Schema(
+  {
+    source: { type: String, required: true }, // e.g. "Me", "Father", "Salary"
+    amount: { type: Number, required: true, min: 0 },
+    status: { type: String, enum: ["received", "expected"], default: "received" },
+    date: { type: Date }, // when received / expected
+    note: { type: String },
+  },
+  { timestamps: true }
+);
+
 const eventSchema = new mongoose.Schema(
   {
     userId: {
@@ -51,11 +64,15 @@ const eventSchema = new mongoose.Schema(
       required: true,
       min: [1, "Estimated cost must be positive"],
     },
-    // Money the user has set aside specifically to fund this event.
+    // Money already in hand for the event — kept in sync as the sum of
+    // "received" funding sources.
     savedAmount: {
       type: Number,
       default: 0,
     },
+    // The funding plan — where the money is coming from (you, family, salary…),
+    // each marked received or expected.
+    fundingSources: [FundingSourceSchema],
     categories: [EventCategorySchema],
     status: {
       type: String,
@@ -71,10 +88,23 @@ const eventSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Funding progress — how much of the estimate is already saved.
+// Funding progress — how much of the estimate is already in hand.
 eventSchema.virtual("fundingProgress").get(function () {
   if (!this.estimatedCost || this.estimatedCost === 0) return 0;
   return Math.min(100, Math.round((this.savedAmount / this.estimatedCost) * 100));
+});
+
+// Expected (committed but not yet received) funding.
+eventSchema.virtual("expectedAmount").get(function () {
+  return (this.fundingSources || [])
+    .filter((f) => f.status === "expected")
+    .reduce((sum, f) => sum + (f.amount || 0), 0);
+});
+
+// Still-to-arrange gap = estimate − received − expected (never negative).
+eventSchema.virtual("toArrange").get(function () {
+  const planned = (this.savedAmount || 0) + this.expectedAmount;
+  return Math.max(0, (this.estimatedCost || 0) - planned);
 });
 
 eventSchema.set("toJSON", { virtuals: true });
